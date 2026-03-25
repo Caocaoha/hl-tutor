@@ -15,16 +15,40 @@ set -euo pipefail
 
 SESSION="hl-tutor"
 INVOCATION_NAME="$(basename "$0")"
-SOURCE_PATH="${BASH_SOURCE[0]}"
-while [ -L "$SOURCE_PATH" ]; do
-	SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
-	SOURCE_PATH="$(readlink "$SOURCE_PATH")"
-	case "$SOURCE_PATH" in
-	/*) ;;
-	*) SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH" ;;
+
+resolve_script_dir() {
+	local source_path source_dir
+	source_path="${BASH_SOURCE[0]:-$0}"
+
+	case "$source_path" in
+	/dev/fd/* | /proc/*/fd/*)
+		pwd
+		return 0
+		;;
 	esac
-done
-SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+
+	while [ -L "$source_path" ]; do
+		source_dir="$(cd -P "$(dirname "$source_path")" 2>/dev/null && pwd)" || {
+			pwd
+			return 0
+		}
+		source_path="$(readlink "$source_path")"
+		case "$source_path" in
+		/*) ;;
+		*) source_path="$source_dir/$source_path" ;;
+		esac
+		case "$source_path" in
+		/dev/fd/* | /proc/*/fd/*)
+			pwd
+			return 0
+			;;
+		esac
+	done
+
+	cd -P "$(dirname "$source_path")" 2>/dev/null && pwd || pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
 TUTOR_WORKSPACE="$HOME/tutor-workspace"
 PROMPTS_SRC="$SCRIPT_DIR"
 MEMORY_SRC="$SCRIPT_DIR/tutor/memory"
@@ -269,10 +293,10 @@ apt_install() {
 		exit 1
 	}
 	if [ "$APT_UPDATED" -eq 0 ]; then
-		sudo apt-get update
+		sudo env DEBIAN_FRONTEND=noninteractive apt-get update
 		APT_UPDATED=1
 	fi
-	sudo apt-get install -y "$@"
+	sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
 
 ensure_package_command() {
@@ -382,7 +406,7 @@ launch_tutor_session() {
 		"clear && printf '\\n  Welcome! This is YOUR terminal.\\n  Your tutor is on the right -->\\n  Start by saying hi!\\n\\n'" \
 		Enter
 
-	tmux split-window -h -t "$SESSION:0.0" -c "$TUTOR_WORKSPACE" -p 40
+	tmux split-window -h -t "$SESSION:0.0" -c "$TUTOR_WORKSPACE" -l 40%
 
 	STUDENT_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '1p')
 	TUTOR_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '2p')
