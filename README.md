@@ -7,6 +7,8 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/hungson175/hl-tutor/main/setup.sh)
 ```
 
+**Video guide:** https://youtu.be/6dNuWougBj8
+
 ## What This Is
 
 A terminal-based coding tutor for complete beginners. It launches a tmux session with two panes:
