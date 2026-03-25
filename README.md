@@ -2,6 +2,11 @@
 
 > **This README is for Claude Code to read.** Follow the instructions below to set up and run the tutor for the user.
 
+# One line command to install on MacOS:
+```Bash
+bash <(curl -fsSL https://raw.githubusercontent.com/hungson175/hl-tutor/main/setup.sh)
+```
+
 ## What This Is
 
 A terminal-based coding tutor for complete beginners. It launches a tmux session with two panes:
