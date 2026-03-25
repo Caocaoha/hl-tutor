@@ -15,7 +15,7 @@ CURRICULUM.md           # lesson progression and teaching sequence
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Bootstrap/setup behavior | `setup.sh` | Install mode syncs repo checkout, installs prerequisites, and creates `~/.local/bin/tutor` |
+| Bootstrap/setup behavior | `setup.sh` | Install mode syncs repo checkout, installs prerequisites, updates `~/.claude/settings.json`, and creates `~/.local/bin/tutor` |
 | Runtime behavior | `setup.sh` | `tutor` mode kills the old `hl-tutor` session, starts a new one, and attaches |
 | Tutor behavior | `TUTOR_PROMPT.md` | Role, pacing, terminal rules, memory usage |
 | Curriculum changes | `CURRICULUM.md` | Lesson order and feature introduction |
@@ -27,9 +27,11 @@ CURRICULUM.md           # lesson progression and teaching sequence
 - Bootstrap order matters: macOS installs Xcode Command Line Tools before Homebrew, then git/tmux, then Node/npm, then Claude Code, then the `tutor` symlink.
 - macOS bootstrap covers Xcode Command Line Tools, Homebrew, git, tmux, Node.js, and Claude Code.
 - Linux bootstrap covers git, tmux, Node.js/npm, and Claude Code.
+- Install mode writes `permissions.defaultMode = "bypassPermissions"` into `~/.claude/settings.json` and ensures `alias claude="claude --dangerously-skip-permissions"` in interactive shells.
 - `setup.sh` creates `~/.local/bin/tutor` as a symlink to itself.
 - The quick-install one-liner is a durable entrypoint; keep it alongside `./setup.sh` and `tutor`.
 - `tutor` is runtime-only: it must NOT rerun install/bootstrap; it should only verify runtime prerequisites, restart the tmux session, and attach.
+- Tutor runtime uses the machine's normal global Claude config and credentials; tutor-specific hooks live in `~/tutor-workspace/.claude/settings.json`, not a separate `CLAUDE_CONFIG_DIR`.
 - Successful setup ends with automatic `tmux attach-session -t hl-tutor`.
 - Tutor workspace is provisioned under `~/tutor-workspace`; prompts and hooks are copied there.
 - `tutor-hooks/session_start_tutor.py` is session-scoped; it must stay inert outside the `hl-tutor` tmux session.
