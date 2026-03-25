@@ -9,7 +9,7 @@
 #   - Persistent memory (progress.md + lessons-learned.md)
 #   - Pane ID resolution into the prompt (${STUDENT_PANE}, etc.)
 #   - SessionStart hook so tutor role survives auto-compact/restart
-#   - CLAUDE_CONFIG_DIR isolation (no global ~/.claude/CLAUDE.md bleed)
+#   - Project-local Claude settings layered on top of the user's global config
 
 set -euo pipefail
 
@@ -33,6 +33,7 @@ REPO_URL="https://github.com/hungson175/hl-tutor.git"
 INSTALL_ROOT="${HL_TUTOR_INSTALL_ROOT:-$HOME/.local/share/hl-tutor}"
 INSTALL_DIR="$INSTALL_ROOT/repo"
 TUTOR_CMD_PATH="$HOME/.local/bin/tutor"
+CLAUDE_USER_SETTINGS_PATH="$HOME/.claude/settings.json"
 LOGIN_SHELL_PROFILES=("$HOME/.profile" "$HOME/.bash_profile" "${ZDOTDIR:-$HOME}/.zprofile")
 INTERACTIVE_SHELL_PROFILES=("$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc")
 APT_UPDATED=0
@@ -49,6 +50,19 @@ append_line_if_missing() {
 	grep -Fqx "$line" "$file" 2>/dev/null || printf '\n%s\n' "$line" >>"$file"
 }
 
+replace_matching_lines_in_file() {
+	local pattern="$1"
+	local replacement="$2"
+	local file="$3"
+	local temp_file
+	mkdir -p "$(dirname "$file")"
+	touch "$file"
+	temp_file="$(mktemp)"
+	grep -Ev "$pattern" "$file" >"$temp_file" || true
+	printf '%s\n' "$replacement" >>"$temp_file"
+	mv "$temp_file" "$file"
+}
+
 ensure_line_in_profiles() {
 	local line="$1"
 	shift
@@ -63,11 +77,21 @@ ensure_path_entry_in_profiles() {
 	ensure_line_in_profiles "export PATH=\"$path_dir:\$PATH\"" "${LOGIN_SHELL_PROFILES[@]}" "${INTERACTIVE_SHELL_PROFILES[@]}"
 }
 
+ensure_alias_in_profiles() {
+	local alias_name="$1"
+	local alias_value="$2"
+	local profile
+	for profile in "${INTERACTIVE_SHELL_PROFILES[@]}"; do
+		replace_matching_lines_in_file "^alias ${alias_name}=" "alias ${alias_name}=\"${alias_value}\"" "$profile"
+	done
+}
+
 ensure_tutor_command() {
 	mkdir -p "$HOME/.local/bin"
 	ln -sf "$SCRIPT_DIR/setup.sh" "$TUTOR_CMD_PATH"
 	ensure_path_entry_in_profiles "$HOME/.local/bin"
-	ensure_line_in_profiles 'alias tutor="$HOME/.local/bin/tutor"' "${INTERACTIVE_SHELL_PROFILES[@]}"
+	ensure_alias_in_profiles tutor '$HOME/.local/bin/tutor'
+	ensure_alias_in_profiles claude 'claude --dangerously-skip-permissions'
 	export PATH="$HOME/.local/bin:$PATH"
 }
 
@@ -79,11 +103,10 @@ npm_global_bin_path() {
 	echo "$npm_prefix/bin"
 }
 
-ensure_claude_command_on_path() {
+load_claude_command_into_current_shell() {
 	local claude_bin_dir
 	claude_bin_dir="$(npm_global_bin_path || true)"
 	if [ -n "$claude_bin_dir" ]; then
-		ensure_path_entry_in_profiles "$claude_bin_dir"
 		export PATH="$claude_bin_dir:$PATH"
 	fi
 	command -v claude >/dev/null 2>&1 || {
@@ -93,6 +116,50 @@ ensure_claude_command_on_path() {
 		fi
 		exit 1
 	}
+}
+
+ensure_claude_command_on_path() {
+	local claude_bin_dir
+	claude_bin_dir="$(npm_global_bin_path || true)"
+	if [ -n "$claude_bin_dir" ]; then
+		ensure_path_entry_in_profiles "$claude_bin_dir"
+	fi
+	load_claude_command_into_current_shell
+}
+
+ensure_global_claude_bypass_mode() {
+	mkdir -p "$(dirname "$CLAUDE_USER_SETTINGS_PATH")"
+	[ -f "$CLAUDE_USER_SETTINGS_PATH" ] || printf '{}\n' >"$CLAUDE_USER_SETTINGS_PATH"
+	node - "$CLAUDE_USER_SETTINGS_PATH" <<'NODE'
+const fs = require('fs')
+
+const settingsPath = process.argv[2]
+
+let settings = {}
+const raw = fs.readFileSync(settingsPath, 'utf8').trim()
+
+if (raw.length > 0) {
+  try {
+    settings = JSON.parse(raw)
+  } catch (error) {
+    console.error(`Error: ${settingsPath} contains invalid JSON. Fix it before running setup again.`)
+    process.exit(1)
+  }
+}
+
+if (settings === null || Array.isArray(settings) || typeof settings !== 'object') {
+  console.error(`Error: ${settingsPath} must contain a JSON object.`)
+  process.exit(1)
+}
+
+if (settings.permissions === null || Array.isArray(settings.permissions) || typeof settings.permissions !== 'object') {
+  settings.permissions = {}
+}
+
+settings.permissions.defaultMode = 'bypassPermissions'
+
+fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`)
+NODE
 }
 
 clipboard_copy_command() {
@@ -256,6 +323,7 @@ ensure_dependencies() {
 		esac
 	fi
 	ensure_claude_command_on_path
+	ensure_global_claude_bypass_mode
 	ensure_tutor_command
 }
 
@@ -269,7 +337,7 @@ ensure_runtime_requirements() {
 		echo "Error: tmux is missing. Re-run ./setup.sh to reinstall prerequisites." >&2
 		exit 1
 	}
-	ensure_claude_command_on_path
+	load_claude_command_into_current_shell
 }
 
 launch_tutor_session() {
@@ -298,10 +366,7 @@ launch_tutor_session() {
 		echo "Existing tutor memory found — preserving student progress."
 	fi
 
-	TUTOR_CLAUDE_CONFIG="$TUTOR_WORKSPACE/.claude-config"
-	mkdir -p "$TUTOR_CLAUDE_CONFIG/commands"
-	cp "$HOOKS_SRC/settings.json" "$TUTOR_CLAUDE_CONFIG/settings.json"
-	cp ~/.claude/commands/ecp.md "$TUTOR_CLAUDE_CONFIG/commands/" 2>/dev/null || true
+	cp "$HOOKS_SRC/settings.json" "$TUTOR_WORKSPACE/.claude/settings.json"
 
 	echo "Creating tmux session '$SESSION'..."
 	tmux new-session -d -s "$SESSION" -c "$TUTOR_WORKSPACE" -x 220 -y 50
@@ -337,7 +402,7 @@ launch_tutor_session() {
 # Auto-generated by setup.sh — do not edit manually
 cd "$TUTOR_WORKSPACE"
 PROMPT_CONTENT="\$(cat '$RESOLVED_PROMPT')"
-exec env CLAUDE_CONFIG_DIR="$TUTOR_CLAUDE_CONFIG" claude --append-system-prompt "\$PROMPT_CONTENT"
+exec claude --append-system-prompt "\$PROMPT_CONTENT"
 LAUNCHER_EOF
 	chmod +x "$LAUNCHER"
 
