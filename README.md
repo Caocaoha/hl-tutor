@@ -7,7 +7,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/hungson175/hl-tutor/main/setup.sh)
 ```
 
-**Video guide:** https://youtu.be/6dNuWougBj8
+[![Video guide](https://img.youtube.com/vi/6dNuWougBj8/maxresdefault.jpg)](https://youtu.be/6dNuWougBj8)
 
 ## What This Is
 
