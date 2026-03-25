@@ -14,6 +14,7 @@
 set -euo pipefail
 
 SESSION="hl-tutor"
+INVOCATION_NAME="$(basename "$0")"
 SOURCE_PATH="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE_PATH" ]; do
 	SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
@@ -28,19 +29,16 @@ TUTOR_WORKSPACE="$HOME/tutor-workspace"
 PROMPTS_SRC="$SCRIPT_DIR"
 MEMORY_SRC="$SCRIPT_DIR/tutor/memory"
 HOOKS_SRC="$SCRIPT_DIR/tutor-hooks"
+REPO_URL="https://github.com/hungson175/hl-tutor.git"
+INSTALL_ROOT="${HL_TUTOR_INSTALL_ROOT:-$HOME/.local/share/hl-tutor}"
+INSTALL_DIR="$INSTALL_ROOT/repo"
 TUTOR_CMD_PATH="$HOME/.local/bin/tutor"
+LOGIN_SHELL_PROFILES=("$HOME/.profile" "$HOME/.bash_profile" "${ZDOTDIR:-$HOME}/.zprofile")
+INTERACTIVE_SHELL_PROFILES=("$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc")
 APT_UPDATED=0
 
 log() {
 	echo "[setup] $1"
-}
-
-shell_profile_path() {
-	case "${SHELL:-}" in
-	*/zsh) echo "${ZDOTDIR:-$HOME}/.zprofile" ;;
-	*/bash) echo "$HOME/.bash_profile" ;;
-	*) echo "$HOME/.profile" ;;
-	esac
 }
 
 append_line_if_missing() {
@@ -51,11 +49,98 @@ append_line_if_missing() {
 	grep -Fqx "$line" "$file" 2>/dev/null || printf '\n%s\n' "$line" >>"$file"
 }
 
+ensure_line_in_profiles() {
+	local line="$1"
+	shift
+	local profile
+	for profile in "$@"; do
+		append_line_if_missing "$line" "$profile"
+	done
+}
+
+ensure_path_entry_in_profiles() {
+	local path_dir="$1"
+	ensure_line_in_profiles "export PATH=\"$path_dir:\$PATH\"" "${LOGIN_SHELL_PROFILES[@]}" "${INTERACTIVE_SHELL_PROFILES[@]}"
+}
+
 ensure_tutor_command() {
 	mkdir -p "$HOME/.local/bin"
 	ln -sf "$SCRIPT_DIR/setup.sh" "$TUTOR_CMD_PATH"
-	append_line_if_missing 'export PATH="$HOME/.local/bin:$PATH"' "$(shell_profile_path)"
+	ensure_path_entry_in_profiles "$HOME/.local/bin"
+	ensure_line_in_profiles 'alias tutor="$HOME/.local/bin/tutor"' "${INTERACTIVE_SHELL_PROFILES[@]}"
 	export PATH="$HOME/.local/bin:$PATH"
+}
+
+npm_global_bin_path() {
+	local npm_prefix
+	command -v npm >/dev/null 2>&1 || return 1
+	npm_prefix="$(npm config get prefix 2>/dev/null || true)"
+	[ -n "$npm_prefix" ] && [ "$npm_prefix" != "undefined" ] || return 1
+	echo "$npm_prefix/bin"
+}
+
+ensure_claude_command_on_path() {
+	local claude_bin_dir
+	claude_bin_dir="$(npm_global_bin_path || true)"
+	if [ -n "$claude_bin_dir" ]; then
+		ensure_path_entry_in_profiles "$claude_bin_dir"
+		export PATH="$claude_bin_dir:$PATH"
+	fi
+	command -v claude >/dev/null 2>&1 || {
+		echo "Error: Claude Code CLI was installed but 'claude' is still not on PATH." >&2
+		if [ -n "$claude_bin_dir" ]; then
+			echo "Run: export PATH=\"$claude_bin_dir:\$PATH\" or restart your shell." >&2
+		fi
+		exit 1
+	}
+}
+
+clipboard_copy_command() {
+	case "$(uname -s)" in
+	Darwin) echo "pbcopy" ;;
+	Linux)
+		if command -v wl-copy >/dev/null 2>&1; then
+			echo "wl-copy"
+		elif command -v xclip >/dev/null 2>&1; then
+			echo "xclip -selection clipboard"
+		fi
+		;;
+	esac
+}
+
+has_repo_companion_files() {
+	[ -f "$PROMPTS_SRC/TUTOR_PROMPT.md" ] &&
+		[ -f "$PROMPTS_SRC/CURRICULUM.md" ] &&
+		[ -f "$HOOKS_SRC/session_start_tutor.py" ] &&
+		[ -f "$HOOKS_SRC/settings.json" ] &&
+		[ -f "$MEMORY_SRC/progress.md" ] &&
+		[ -f "$MEMORY_SRC/lessons-learned.md" ]
+}
+
+bootstrap_repo_checkout() {
+	has_repo_companion_files && return 0
+
+	[ "${HL_TUTOR_BOOTSTRAPPED:-0}" = "1" ] && {
+		echo "Error: setup.sh is missing the repository files it needs to continue." >&2
+		exit 1
+	}
+
+	log "Fetching hl-tutor repository..."
+	ensure_xcode_command_line_tools
+	ensure_homebrew
+	ensure_package_command git git
+	mkdir -p "$INSTALL_ROOT"
+	if [ -d "$INSTALL_DIR/.git" ]; then
+		log "Updating existing checkout at $INSTALL_DIR..."
+		git -C "$INSTALL_DIR" pull --ff-only
+	elif [ -e "$INSTALL_DIR" ]; then
+		echo "Error: $INSTALL_DIR exists but is not a git checkout." >&2
+		exit 1
+	else
+		log "Cloning hl-tutor into $INSTALL_DIR..."
+		git clone "$REPO_URL" "$INSTALL_DIR"
+	fi
+	exec env HL_TUTOR_BOOTSTRAPPED=1 bash "$INSTALL_DIR/setup.sh" "$@"
 }
 
 ensure_xcode_command_line_tools() {
@@ -92,14 +177,22 @@ brew_bin_path() {
 ensure_homebrew() {
 	local brew_bin brew_shellenv_line
 	[ "$(uname -s)" = "Darwin" ] || return 0
-	brew_bin="$(command -v brew 2>/dev/null || brew_bin_path || true)"
+	brew_bin="$(brew_bin_path || true)"
+	if [ -z "$brew_bin" ]; then
+		brew_bin="$(command -v brew 2>/dev/null || true)"
+		[ -n "$brew_bin" ] && [ -x "$brew_bin" ] || brew_bin=""
+	fi
 	[ -n "$brew_bin" ] || {
 		log "Installing Homebrew..."
 		NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 		brew_bin="$(brew_bin_path)"
 	}
+	[ -n "$brew_bin" ] || {
+		echo "Error: Homebrew install completed but brew was not found." >&2
+		exit 1
+	}
 	brew_shellenv_line="eval \"\$(${brew_bin} shellenv)\""
-	append_line_if_missing "$brew_shellenv_line" "$(shell_profile_path)"
+	ensure_line_in_profiles "$brew_shellenv_line" "${LOGIN_SHELL_PROFILES[@]}"
 	eval "$(${brew_bin} shellenv)"
 }
 
@@ -150,6 +243,10 @@ ensure_dependencies() {
 	ensure_homebrew
 	ensure_package_command git git
 	ensure_package_command tmux tmux
+	if [ "$(uname -s)" = "Linux" ] && ! command -v wl-copy >/dev/null 2>&1 && ! command -v xclip >/dev/null 2>&1; then
+		log "Installing xclip for clipboard support..."
+		apt_install xclip
+	fi
 	ensure_node_and_npm
 	if ! command -v claude >/dev/null 2>&1; then
 		log "Installing Claude Code CLI..."
@@ -158,111 +255,124 @@ ensure_dependencies() {
 		*) npm install -g @anthropic-ai/claude-code ;;
 		esac
 	fi
+	ensure_claude_command_on_path
 	ensure_tutor_command
 }
 
-ensure_dependencies
+ensure_runtime_requirements() {
+	has_repo_companion_files || {
+		echo "Error: tutor runtime files are missing." >&2
+		echo "Run the install command again: bash <(curl -fsSL https://raw.githubusercontent.com/hungson175/hl-tutor/main/setup.sh)" >&2
+		exit 1
+	}
+	command -v tmux >/dev/null 2>&1 || {
+		echo "Error: tmux is missing. Re-run ./setup.sh to reinstall prerequisites." >&2
+		exit 1
+	}
+	ensure_claude_command_on_path
+}
 
-# ── Kill existing session if any ──────────────────────────────────────────────
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-	echo "Session '$SESSION' already exists. Killing it..."
-	tmux kill-session -t "$SESSION"
-fi
+launch_tutor_session() {
+	local clipboard_command
+	if tmux has-session -t "$SESSION" 2>/dev/null; then
+		echo "Session '$SESSION' already exists. Killing it..."
+		tmux kill-session -t "$SESSION"
+	fi
 
-# ── Provision tutor workspace ─────────────────────────────────────────────────
-echo "Provisioning tutor workspace at $TUTOR_WORKSPACE..."
-mkdir -p "$TUTOR_WORKSPACE"/{prompts,projects}
-mkdir -p "$TUTOR_WORKSPACE/.claude/hooks"
+	echo "Provisioning tutor workspace at $TUTOR_WORKSPACE..."
+	mkdir -p "$TUTOR_WORKSPACE"/{prompts,projects}
+	mkdir -p "$TUTOR_WORKSPACE/.claude/hooks"
 
-# Copy prompts (always refresh from source)
-cp "$PROMPTS_SRC/TUTOR_PROMPT.md" "$TUTOR_WORKSPACE/prompts/TUTOR_PROMPT.md"
-cp "$PROMPTS_SRC/CURRICULUM.md" "$TUTOR_WORKSPACE/prompts/CURRICULUM.md"
+	cp "$PROMPTS_SRC/TUTOR_PROMPT.md" "$TUTOR_WORKSPACE/prompts/TUTOR_PROMPT.md"
+	cp "$PROMPTS_SRC/CURRICULUM.md" "$TUTOR_WORKSPACE/prompts/CURRICULUM.md"
 
-# Copy hooks (always refresh from source)
-cp "$HOOKS_SRC/session_start_tutor.py" "$TUTOR_WORKSPACE/.claude/hooks/session_start_tutor.py"
-chmod +x "$TUTOR_WORKSPACE/.claude/hooks/session_start_tutor.py"
+	cp "$HOOKS_SRC/session_start_tutor.py" "$TUTOR_WORKSPACE/.claude/hooks/session_start_tutor.py"
+	chmod +x "$TUTOR_WORKSPACE/.claude/hooks/session_start_tutor.py"
 
-# Migrate memory: only initialize on fresh start, preserve existing progress
-if [ ! -f "$TUTOR_WORKSPACE/memory/progress.md" ]; then
-	echo "Initializing fresh tutor memory..."
-	mkdir -p "$TUTOR_WORKSPACE/memory"
-	cp "$MEMORY_SRC/progress.md" "$TUTOR_WORKSPACE/memory/progress.md"
-	cp "$MEMORY_SRC/lessons-learned.md" "$TUTOR_WORKSPACE/memory/lessons-learned.md"
-else
-	echo "Existing tutor memory found — preserving student progress."
-fi
+	if [ ! -f "$TUTOR_WORKSPACE/memory/progress.md" ]; then
+		echo "Initializing fresh tutor memory..."
+		mkdir -p "$TUTOR_WORKSPACE/memory"
+		cp "$MEMORY_SRC/progress.md" "$TUTOR_WORKSPACE/memory/progress.md"
+		cp "$MEMORY_SRC/lessons-learned.md" "$TUTOR_WORKSPACE/memory/lessons-learned.md"
+	else
+		echo "Existing tutor memory found — preserving student progress."
+	fi
 
-# Isolated Claude config: prevents global ~/.claude/CLAUDE.md from bleeding in
-TUTOR_CLAUDE_CONFIG="$TUTOR_WORKSPACE/.claude-config"
-mkdir -p "$TUTOR_CLAUDE_CONFIG/commands"
-# Bring in the hooks settings (not the global CLAUDE.md)
-cp "$HOOKS_SRC/settings.json" "$TUTOR_CLAUDE_CONFIG/settings.json"
-# Copy /ecp command if available (used to load prompts in Claude Code)
-cp ~/.claude/commands/ecp.md "$TUTOR_CLAUDE_CONFIG/commands/" 2>/dev/null || true
+	TUTOR_CLAUDE_CONFIG="$TUTOR_WORKSPACE/.claude-config"
+	mkdir -p "$TUTOR_CLAUDE_CONFIG/commands"
+	cp "$HOOKS_SRC/settings.json" "$TUTOR_CLAUDE_CONFIG/settings.json"
+	cp ~/.claude/commands/ecp.md "$TUTOR_CLAUDE_CONFIG/commands/" 2>/dev/null || true
 
-# ── Create tmux session ───────────────────────────────────────────────────────
-echo "Creating tmux session '$SESSION'..."
-tmux new-session -d -s "$SESSION" -c "$TUTOR_WORKSPACE" -x 220 -y 50
+	echo "Creating tmux session '$SESSION'..."
+	tmux new-session -d -s "$SESSION" -c "$TUTOR_WORKSPACE" -x 220 -y 50
 
-# Enable mouse support (click panes, scroll, resize)
-tmux set-option -t "$SESSION" -g mouse on
+	tmux set-option -t "$SESSION" -g mouse on
+	clipboard_command="$(clipboard_copy_command || true)"
+	if [ -n "$clipboard_command" ]; then
+		tmux bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_command"
+		tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_command"
+	fi
 
-# Copy mouse drag selections to the macOS clipboard on release
-tmux bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"
-tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"
+	tmux send-keys -t "$SESSION:0.0" \
+		"clear && printf '\\n  Welcome! This is YOUR terminal.\\n  Your tutor is on the right -->\\n  Start by saying hi!\\n\\n'" \
+		Enter
 
-# Student pane (left): bash welcome
-tmux send-keys -t "$SESSION:0.0" \
-	"clear && printf '\\n  Welcome! This is YOUR terminal.\\n  Your tutor is on the right -->\\n  Start by saying hi!\\n\\n'" \
-	Enter
+	tmux split-window -h -t "$SESSION:0.0" -c "$TUTOR_WORKSPACE" -p 40
 
-# Split: right pane for tutor (40% width)
-tmux split-window -h -t "$SESSION:0.0" -c "$TUTOR_WORKSPACE" -p 40
+	STUDENT_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '1p')
+	TUTOR_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '2p')
 
-# ── Resolve pane IDs into tutor prompt ───────────────────────────────────────
-STUDENT_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '1p')
-TUTOR_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '2p')
+	echo "Pane IDs:  STUDENT=$STUDENT_PANE  TUTOR=$TUTOR_PANE"
 
-echo "Pane IDs:  STUDENT=$STUDENT_PANE  TUTOR=$TUTOR_PANE"
+	RESOLVED_PROMPT="$TUTOR_WORKSPACE/prompts/.TUTOR_PROMPT_RESOLVED.md"
+	cp "$TUTOR_WORKSPACE/prompts/TUTOR_PROMPT.md" "$RESOLVED_PROMPT"
 
-RESOLVED_PROMPT="$TUTOR_WORKSPACE/prompts/.TUTOR_PROMPT_RESOLVED.md"
-cp "$TUTOR_WORKSPACE/prompts/TUTOR_PROMPT.md" "$RESOLVED_PROMPT"
+	perl -i -pe "s|\\\${STUDENT_PANE}|$STUDENT_PANE|g" "$RESOLVED_PROMPT"
+	perl -i -pe "s|\\\${TUTOR_PANE}|$TUTOR_PANE|g" "$RESOLVED_PROMPT"
+	perl -i -pe "s|\\\${PROJECT_ROOT}|$SCRIPT_DIR|g" "$RESOLVED_PROMPT"
 
-# Substitute placeholders (perl works identically on macOS and Linux)
-perl -i -pe "s|\\\${STUDENT_PANE}|$STUDENT_PANE|g" "$RESOLVED_PROMPT"
-perl -i -pe "s|\\\${TUTOR_PANE}|$TUTOR_PANE|g" "$RESOLVED_PROMPT"
-perl -i -pe "s|\\\${PROJECT_ROOT}|$SCRIPT_DIR|g" "$RESOLVED_PROMPT"
-
-# ── Generate tutor launcher script ───────────────────────────────────────────
-# A wrapper script avoids all quoting issues when passing the prompt via tmux
-LAUNCHER="$TUTOR_WORKSPACE/.launch-tutor.sh"
-cat >"$LAUNCHER" <<LAUNCHER_EOF
+	LAUNCHER="$TUTOR_WORKSPACE/.launch-tutor.sh"
+	cat >"$LAUNCHER" <<LAUNCHER_EOF
 #!/usr/bin/env bash
 # Auto-generated by setup.sh — do not edit manually
 cd "$TUTOR_WORKSPACE"
 PROMPT_CONTENT="\$(cat '$RESOLVED_PROMPT')"
 exec env CLAUDE_CONFIG_DIR="$TUTOR_CLAUDE_CONFIG" claude --append-system-prompt "\$PROMPT_CONTENT"
 LAUNCHER_EOF
-chmod +x "$LAUNCHER"
+	chmod +x "$LAUNCHER"
 
-# ── Start tutor Claude Code in right pane ────────────────────────────────────
-tmux send-keys -t "$SESSION:0.1" "$LAUNCHER" Enter
+	tmux send-keys -t "$SESSION:0.1" "$LAUNCHER" Enter
+	tmux select-pane -t "$SESSION:0.0"
 
-# Focus the student pane so they start there
-tmux select-pane -t "$SESSION:0.0"
+	echo ""
+	echo "  hl-tutor is starting..."
+	echo ""
+	echo "  Left pane:  Your terminal (start here)"
+	echo "  Right pane: Your AI tutor"
+	echo "  Workspace:  $TUTOR_WORKSPACE"
+	echo "  Memory:     $TUTOR_WORKSPACE/memory/"
+	echo "  Command:    tutor"
+	echo ""
+	echo "  To reattach later: tmux attach -t $SESSION"
+	echo "  To launch later:   tutor"
+	echo "  If tutor/claude are missing in old shells after detach, run: exec $SHELL -l"
+	echo ""
 
-# ── Attach ────────────────────────────────────────────────────────────────────
-echo ""
-echo "  hl-tutor is starting..."
-echo ""
-echo "  Left pane:  Your terminal (start here)"
-echo "  Right pane: Your AI tutor"
-echo "  Workspace:  $TUTOR_WORKSPACE"
-echo "  Memory:     $TUTOR_WORKSPACE/memory/"
-echo "  Command:    tutor"
-echo ""
-echo "  To reattach later: tmux attach -t $SESSION"
-echo "  To launch later:   tutor"
-echo ""
+	tmux attach-session -t "$SESSION"
+}
 
-tmux attach-session -t "$SESSION"
+run_install_mode() {
+	bootstrap_repo_checkout "$@"
+	ensure_dependencies
+	launch_tutor_session
+}
+
+run_tutor_mode() {
+	ensure_runtime_requirements
+	launch_tutor_session
+}
+
+case "$INVOCATION_NAME" in
+tutor) run_tutor_mode "$@" ;;
+*) run_install_mode "$@" ;;
+esac

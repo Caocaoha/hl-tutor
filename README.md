@@ -16,21 +16,35 @@ The tutor guides students from zero knowledge through terminal basics, HTML, CSS
 
 - **macOS**: Xcode Command Line Tools, Homebrew, git, tmux, Node.js, and Claude Code are installed automatically if missing.
 - **Linux (apt-based)**: git, tmux, Node.js/npm, and Claude Code are installed automatically if missing.
-- The script also installs a global `tutor` command at `~/.local/bin/tutor` and adds `~/.local/bin` to your shell profile if needed.
+- The script also installs a global `tutor` command at `~/.local/bin/tutor`, adds the required PATH entries for `tutor` and `claude` into common shell config files, and writes `alias tutor=...` into interactive shell configs.
 
 ## Setup & Run
 
-**Step 1**: Make the setup script executable and run it:
+Quick install from any terminal:
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/hungson175/hl-tutor/main/setup.sh)
+```
+
+This downloads `setup.sh`, clones or updates `hl-tutor` into `~/.local/share/hl-tutor/repo`, bootstraps missing dependencies, installs the global `tutor` command, then launches the tutor session and automatically attaches you to it.
+
+If you already cloned the repo locally, you can still run it directly:
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
-That's it. The script bootstraps missing dependencies, creates the global `tutor` command, launches the tmux session, automatically attaches you to it, and the tutor introduces itself to the student.
-
-After the first run you can start it again with:
+After the first install, launch it again with:
 ```bash
 tutor
+```
+
+`tutor` is the day-to-day runtime command. It kills any existing `hl-tutor` tmux session, starts a fresh one, and attaches to it. It does **not** rerun the install/bootstrap flow.
+
+For local checkouts, the same script is still the only entrypoint.
+
+If `tutor` or `claude` is not available in an older shell after install, start a fresh shell or run:
+```bash
+exec $SHELL -l
 ```
 
 ### Reattaching to an existing session
@@ -42,11 +56,12 @@ tmux attach -t hl-tutor
 
 ## How It Works
 
-1. `setup.sh` bootstraps missing dependencies and installs the global `tutor` launcher.
-2. It creates a tmux session called `hl-tutor`.
-3. It resolves the tutor prompt into `~/tutor-workspace/prompts/.TUTOR_PROMPT_RESOLVED.md` and launches Claude Code with that prompt appended as its system prompt.
-4. It splits the terminal: student on the left, Claude Code tutor on the right.
-5. The tutor can observe the student's terminal via `tmux capture-pane` and guide them step by step.
+1. Install mode (`bash <(curl ...)` or `./setup.sh`) clones or updates the repo into `~/.local/share/hl-tutor/repo` when needed, then bootstraps missing dependencies and installs the global `tutor` command.
+2. Runtime mode (`tutor`) skips the install/bootstrap flow and just restarts the tutor tmux session.
+3. The script creates a tmux session called `hl-tutor`.
+4. It resolves the tutor prompt into `~/tutor-workspace/prompts/.TUTOR_PROMPT_RESOLVED.md` and launches Claude Code with that prompt appended as its system prompt.
+5. It splits the terminal: student on the left, Claude Code tutor on the right.
+6. The tutor can observe the student's terminal via `tmux capture-pane` and guide them step by step.
 
 ## Files
 
